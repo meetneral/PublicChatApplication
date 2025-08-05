@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spring Boot Chat (JWT)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.5.0/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f7f6; color: #333; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .container {
+            max-width: 600px;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .login-form, .chat-window {
+            padding: 30px;
+        }
+        .login-form { text-align: center; }
+        .login-form input {
+            width: calc(100% - 22px);
+            padding: 10px;
+            margin-bottom: 15px;
+            border: 1px solid #ced4da;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        .login-form button {
+            width: 100%;
+            padding: 10px 15px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 18px;
+        }
+        .login-form button:hover { background-color: #0056b3; }
+        .login-error { color: red; margin-bottom: 15px; }
+
+        .chat-window { display: none; } /* Hidden by default */
+        .header {
+            background-color: #007bff;
+            color: white;
+            padding: 15px;
+            text-align: center;
+            font-size: 20px;
+            font-weight: bold;
+        }
+        .messages {
+            height: 400px;
+            overflow-y: auto;
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            background-color: #e9ecef;
+        }
+        .message {
+            margin-bottom: 10px;
+            padding: 8px 12px;
+            border-radius: 5px;
+            word-wrap: break-word;
+        }
+        .message.self {
+            background-color: #dcf8c6;
+            text-align: right;
+            margin-left: 20%;
+        }
+        .message.other {
+            background-color: #f1f0f0;
+            text-align: left;
+            margin-right: 20%;
+        }
+        .message.join-leave {
+            text-align: center;
+            font-style: italic;
+            color: #666;
+        }
+        .input-area {
+            display: flex;
+            padding: 15px;
+            background-color: #f8f9fa;
+        }
+        .input-area input[type="text"] {
+            flex-grow: 1;
+            padding: 10px;
+            border: 1px solid #ced4da;
+            border-radius: 5px;
+            margin-right: 10px;
+            font-size: 16px;
+        }
+        .input-area button {
+            padding: 10px 15px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .input-area button:hover {
+            background-color: #0056b3;
+        }
+        .logout-button {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 8px 12px;
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .logout-button:hover {
+            background-color: #c82333;
+        }
+    </style>
+</head>
+<body>
+<button class="logout-button" id="logoutButton" style="display: none;">Logout</button>
+<div class="container">
+    <div class="login-form" id="loginForm">
+        <h2>Login to Chat (JWT)</h2>
+        <div id="loginError" class="login-error" style="display: none;"></div>
+        <input type="text" id="usernameInput" placeholder="Username">
+        <input type="password" id="passwordInput" placeholder="Password">
+        <button id="loginButton">Login</button>
+    </div>
+
+    <div class="chat-window" id="chatWindow">
+        <div class="header">
+            Welcome to Chat, <span id="currentUsername"></span>!
+        </div>
+        <div class="messages" id="messages">
+            <!-- Chat messages will appear here -->
+        </div>
+        <div class="input-area">
+            <input type="text" id="messageInput" placeholder="Type your message..." disabled>
+            <button id="sendMessageButton" disabled>Send</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    let stompClient = null;
+    let username = null;
+    let jwtToken = null;
+
+    const loginForm = document.getElementById('loginForm');
+    const chatWindow = document.getElementById('chatWindow');
+    const usernameInput = document.getElementById('usernameInput');
+    const passwordInput = document.getElementById('passwordInput');
+    const loginButton = document.getElementById('loginButton');
+    const loginError = document.getElementById('loginError');
+    const logoutButton = document.getElementById('logoutButton');
+
+    const messagesDiv = document.getElementById('messages');
+    const messageInput = document.getElementById('messageInput');
+    const sendMessageButton = document.getElementById('sendMessageButton');
+    const currentUsernameSpan = document.getElementById('currentUsername');
+
+    loginButton.addEventListener('click', performLogin);
+    sendMessageButton.addEventListener('click', sendMessage);
+    logoutButton.addEventListener('click', performLogout);
+    messageInput.addEventListener('keypress', (event) => {
+        if (event.key === 'Enter') {
+            sendMessage();
+        }
+    });
+
+    // Check for existing token on page load
+    document.addEventListener('DOMContentLoaded', () => {
+        const storedToken = localStorage.getItem('jwtToken');
+        if (storedToken) {
+            jwtToken = storedToken;
+            // Attempt to connect immediately if token exists
+            // In a real app, you might validate token on backend first
+            showChatWindow();
+            connectWebSocket();
+        } else {
+            showLoginForm();
+        }
+    });
+
+    function showLoginForm() {
+        loginForm.style.display = 'block';
+        chatWindow.style.display = 'none';
+        logoutButton.style.display = 'none';
+    }
+
+    function showChatWindow() {
+        loginForm.style.display = 'none';
+        chatWindow.style.display = 'block';
+        logoutButton.style.display = 'block';
+    }
+
+    function performLogin() {
+        const user = usernameInput.value;
+        const pass = passwordInput.value;
+
+        fetch('http://localhost:8090/authenticate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ username: user, password: pass })
+        })
+        .then(response => {
+            if (!response.ok) {
+                return response.text().then(text => { throw new Error(text) });
+            }
+            return response.json();
+        })
+        .then(data => {
+            jwtToken = data.jwt;
+            localStorage.setItem('jwtToken', jwtToken); // Store token
+            username = user; // Set username after successful login
+            currentUsernameSpan.textContent = username;
+            showChatWindow();
+            connectWebSocket();
+        })
+        .catch(error => {
+            console.error('Login failed:', error);
+            loginError.textContent = 'Login failed: ' + error.message;
+            loginError.style.display = 'block';
+        });
+    }
+
+    function performLogout() {
+        localStorage.removeItem('jwtToken');
+        jwtToken = null;
+        username = null;
+        if (stompClient && stompClient.connected) {
+            stompClient.disconnect(() => {
+                console.log("Disconnected from STOMP");
+                showLoginForm();
+                messagesDiv.innerHTML = ''; // Clear messages
+                messageInput.value = '';
+                messageInput.disabled = true;
+                sendMessageButton.disabled = true;
+            });
+        } else {
+            showLoginForm();
+            messagesDiv.innerHTML = '';
+            messageInput.value = '';
+            messageInput.disabled = true;
+            sendMessageButton.disabled = true;
+        }
+    }
+
+    function connectWebSocket() {
+        messageInput.disabled = false;
+        sendMessageButton.disabled = false;
+
+        // Pass JWT token in the SockJS handshake headers
+        const socket = new SockJS('http://localhost:8090/ws');
+        stompClient = Stomp.over(socket);
+
+        // Override the client's _connect method to add headers
+        const originalConnect = stompClient._connect;
+        stompClient._connect = function(headers, connectCallback, errorCallback) {
+            if (jwtToken) {
+                headers.Authorization = 'Bearer ' + jwtToken;
+            }
+            originalConnect.call(this, headers, connectCallback, errorCallback);
+        };
+
+        stompClient.connect({}, onConnected, onError);
+    }
+
+    function onConnected() {
+        console.log('Connected to WebSocket');
+        stompClient.subscribe('/topic/public', onMessageReceived);
+
+        // Send a JOIN message to the server
+        stompClient.send("/app/chat.addUser", {}, JSON.stringify({type: 'JOIN'}));
+    }
+
+    function onError(error) {
+        console.error('Could not connect to WebSocket server. Error: ' + error);
+        messagesDiv.innerHTML += `<div class="message join-leave">Could not connect to chat server. Please ensure you are logged in.</div>`;
+        messageInput.disabled = true;
+        sendMessageButton.disabled = true;
+        // If WebSocket connection fails, assume token might be invalid or expired
+        performLogout(); // Redirect to login
+    }
+
+    function sendMessage() {
+        const messageContent = messageInput.value.trim();
+        if (messageContent && stompClient && stompClient.connected) {
+            const chatMessage = {
+                content: messageContent,
+                type: 'CHAT'
+            };
+            stompClient.send("/app/chat.sendMessage", {}, JSON.stringify(chatMessage));
+            messageInput.value = ''; // Clear input
+        }
+    }
+
+    function onMessageReceived(payload) {
+        const message = JSON.parse(payload.body);
+        const messageElement = document.createElement('div');
+        messageElement.classList.add('message');
+
+        if (message.type === 'JOIN') {
+            messageElement.classList.add('join-leave');
+            messageElement.textContent = message.sender + ' joined!';
+        } else if (message.type === 'LEAVE') {
+            messageElement.classList.add('join-leave');
+            messageElement.textContent = message.sender + ' left!';
+        } else {
+            messageElement.classList.add(message.sender === username ? 'self' : 'other');
+            const senderSpan = document.createElement('span');
+            senderSpan.style.fontWeight = 'bold';
+            senderSpan.textContent = message.sender + ': ';
+            messageElement.appendChild(senderSpan);
+            messageElement.appendChild(document.createTextNode(message.content));
+        }
+        messagesDiv.appendChild(messageElement);
+        messagesDiv.scrollTop = messagesDiv.scrollHeight; // Scroll to bottom
+    }
+</script>
+</body>
+</html>
